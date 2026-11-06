@@ -3,12 +3,23 @@ const startInput = document.getElementById('startDate');
 const endInput = document.getElementById('endDate');
 const getImagesButton = document.getElementById('getImagesButton');
 const gallery = document.getElementById('gallery');
+const spaceFact = document.getElementById('spaceFact');
 const imageModal = document.getElementById('imageModal');
 const modalContent = document.getElementById('modalContent');
 const closeModalButton = document.getElementById('closeModalButton');
-// Replace DEMO_KEY with your own key from https://api.nasa.gov/ to avoid the shared demo-key limit.
-const nasaApiKey = 'DEMO_KEY';
+const apodApiUrl = 'https://science.nasa.gov/wp-json/wp/v2/apod-basic';
+const apodPageSize = 25;
 let apodImages = [];
+
+// Choose one space fact to show each time the page loads.
+const spaceFacts = [
+	'Light from the Sun takes about 8 minutes and 20 seconds to reach Earth.',
+	'A day on Venus is longer than a year on Venus.',
+	'The Moon moves about 3.8 centimeters farther from Earth each year.',
+	'Mars is home to Olympus Mons, the tallest volcano in the solar system.'
+];
+const randomFactIndex = Math.floor(Math.random() * spaceFacts.length);
+spaceFact.textContent = spaceFacts[randomFactIndex];
 
 // Call the setupDateInputs function from dateRange.js
 // This sets up the date pickers to:
@@ -37,29 +48,66 @@ async function getSpaceImages() {
 		return;
 	}
 
-	const parameters = new URLSearchParams({
-		api_key: nasaApiKey,
-		start_date: startDate,
-		end_date: endDate,
-		thumbs: 'true'
-	});
-
 	gallery.innerHTML = '<p class="placeholder">Loading space images...</p>';
 	getImagesButton.disabled = true;
 
 	try {
-		const response = await fetch(`https://api.nasa.gov/planetary/apod?${parameters}`);
+		const today = new Date().toISOString().split('T')[0];
+		const daysBeforeEndDate = Math.floor(
+			(Date.parse(`${today}T00:00:00Z`) - Date.parse(`${endDate}T00:00:00Z`)) / 86400000
+		);
+		let page = Math.max(1, Math.floor(daysBeforeEndDate / apodPageSize) + 1);
+		apodImages = [];
 
-		if (!response.ok) {
-			if (response.status === 429) {
-				throw new Error('NASA API rate limit reached. Wait and try again, or replace nasaApiKey in js/script.js with your own key from https://api.nasa.gov/.');
+		while (true) {
+			const response = await fetch(`${apodApiUrl}?page=${page}`);
+
+			if (!response.ok) {
+				throw new Error('NASA could not load images for those dates. Please try again.');
 			}
 
-			throw new Error('NASA could not load images for those dates. Please try again.');
+			const pageImages = await response.json();
+
+			if (!Array.isArray(pageImages)) {
+				throw new Error('NASA returned an unexpected response. Please try again.');
+			}
+
+			if (pageImages.length === 0) {
+				break;
+			}
+
+			const newestDate = pageImages[0].date;
+			const oldestDate = pageImages[pageImages.length - 1].date;
+
+			if (oldestDate > endDate) {
+				page++;
+				continue;
+			}
+
+			if (newestDate < startDate) {
+				if (apodImages.length > 0) break;
+				page--;
+				if (page < 1) break;
+				continue;
+			}
+
+			apodImages.push(...pageImages.filter(image =>
+				image.date >= startDate && image.date <= endDate
+			));
+
+			if (oldestDate <= startDate) {
+				break;
+			}
+
+			page++;
 		}
 
-		const images = await response.json();
-		apodImages = images;
+		if (apodImages.length === 0) {
+			gallery.innerHTML = '<p class="placeholder">No APOD images were found for those dates.</p>';
+			return;
+		}
+
+		apodImages.reverse();
 		gallery.innerHTML = apodImages.map(createImageCard).join('');
 	} catch (error) {
 		gallery.innerHTML = `<p class="placeholder">${error.message}</p>`;
@@ -69,11 +117,30 @@ async function getSpaceImages() {
 }
 
 function createImageCard(image) {
-	const imageUrl = image.media_type === 'video' ? image.thumbnail_url : image.url;
-	const media = imageUrl
-		? `<img src="${imageUrl}" alt="${image.title}" loading="lazy">`
-		: '<p>NASA video</p>';
+	const isVideo = image.media_type === 'video';
+	const imageUrl = isVideo ? image.hdurl : image.hdurl || image.url;
+	let media;
+	if (imageUrl) {
+		media = `<img src="${imageUrl}" alt="${image.title}" loading="lazy">`;
+	} else if (isVideo) {
+		media = '<p>Video entry</p>';
+	} else {
+		media = '<p>Image unavailable</p>';
+	}
 	const imageIndex = apodImages.indexOf(image);
+
+	if (isVideo) {
+		return `
+			<article class="gallery-item">
+				${media}
+				<p><strong>${image.title}</strong></p>
+				<p>${image.date}</p>
+				<a class="video-link" href="${image.url}" target="_blank" rel="noopener">
+					Watch video on NASA
+				</a>
+			</article>
+		`;
+	}
 
 	return `
 		<article class="gallery-item" data-image-index="${imageIndex}" role="button" tabindex="0" aria-label="View details for ${image.title}">
@@ -87,7 +154,7 @@ function createImageCard(image) {
 function handleGalleryClick(event) {
 	const galleryItem = event.target.closest('.gallery-item');
 
-	if (galleryItem) {
+	if (galleryItem && galleryItem.dataset.imageIndex !== undefined) {
 		openImageModal(apodImages[galleryItem.dataset.imageIndex]);
 	}
 }
@@ -96,7 +163,7 @@ function handleGalleryKeydown(event) {
 	if (event.key === 'Enter' || event.key === ' ') {
 		const galleryItem = event.target.closest('.gallery-item');
 
-		if (galleryItem) {
+		if (galleryItem && galleryItem.dataset.imageIndex !== undefined) {
 			event.preventDefault();
 			openImageModal(apodImages[galleryItem.dataset.imageIndex]);
 		}
@@ -130,7 +197,9 @@ function openImageModal(image) {
 
 	const explanation = document.createElement('p');
 	explanation.className = 'modal-explanation';
-	explanation.textContent = image.explanation;
+	explanation.textContent = new DOMParser()
+		.parseFromString(image.explanation || '', 'text/html')
+		.body.textContent;
 	modalContent.append(explanation);
 
 	if (image.media_type === 'video') {
